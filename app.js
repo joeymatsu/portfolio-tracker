@@ -1,11 +1,17 @@
 const STORAGE_KEY = "portfolioTracker.v1";
 const SETTINGS_KEY = "portfolioTracker.settings.v1";
-const AUTO_REFRESH_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
+const AUTO_REFRESH_INTERVAL_MS = 15 * 60 * 1000;
 let autoRefreshTimer = null;
 
 const state = {
   holdings: [],
-  settings: { usdJpy: 147.0, theme: "light" },
+  settings: {
+    usdJpy: 147.0,
+    theme: "light",
+    lastAutoRefresh: null,
+    lastFxUpdate: null,
+    fxSource: "Manual"
+  },
   filters: { search: "", market: "ALL", asset: "ALL" }
 };
 
@@ -44,7 +50,7 @@ const el = {
   themeToggle: $("themeToggle"),
   exportBtn: $("exportBtn"),
   importInput: $("importInput"),
-  refreshBtn: $("refreshBtn")
+  refreshPricesBtn: $("refreshPricesBtn")
 };
 
 function load() {
@@ -52,7 +58,9 @@ function load() {
     state.holdings = JSON.parse(localStorage.getItem(STORAGE_KEY)) || [];
     state.settings = { ...state.settings, ...(JSON.parse(localStorage.getItem(SETTINGS_KEY)) || {}) };
   } catch (_) {}
+
   el.usdJpyInput.value = state.settings.usdJpy;
+  el.usdJpyInput.title = fxTitle();
   document.body.classList.toggle("dark", state.settings.theme === "dark");
   render();
 }
@@ -132,6 +140,9 @@ function render() {
     const cls = m.plLocal >= 0 ? "pl-positive" : "pl-negative";
     const sign = m.plLocal >= 0 ? "+" : "";
     const short = h.assetType === "Mutual Fund" ? "MF" : h.assetType === "ETF" ? "ETF" : h.market;
+    const source = h.quoteSource || "Manual";
+    const updated = h.lastUpdated ? ` · ${new Date(h.lastUpdated).toLocaleString()}` : "";
+
     return `
       <tr>
         <td>
@@ -147,7 +158,7 @@ function render() {
         <td>${number(h.quantity)}</td>
         <td>${money(h.buyPrice, h.currency)}</td>
         <td>${money(h.currentPrice, h.currency)}
-          <span class="quote-meta"><span class="status-dot ${h.quoteSource ? "" : "manual"}"></span>${escapeHtml(h.quoteSource || "Manual")}${h.lastUpdated ? " · " + new Date(h.lastUpdated).toLocaleString() : ""}</span>
+          <span class="quote-meta"><span class="status-dot ${source === "Manual" ? "manual" : ""}"></span>${escapeHtml(source)}${updated}</span>
         </td>
         <td>${money(m.valueLocal, h.currency)}</td>
         <td class="${cls}">
@@ -159,6 +170,14 @@ function render() {
   }).join("");
 
   el.emptyState.classList.toggle("hidden", rows.length > 0);
+  el.usdJpyInput.value = state.settings.usdJpy;
+  el.usdJpyInput.title = fxTitle();
+}
+
+function fxTitle() {
+  const source = state.settings.fxSource || "Manual";
+  const when = state.settings.lastFxUpdate ? ` · ${new Date(state.settings.lastFxUpdate).toLocaleString()}` : "";
+  return `USD/JPY source: ${source}${when}`;
 }
 
 function escapeHtml(s = "") {
@@ -180,6 +199,7 @@ function openAdd() {
 window.editHolding = function(id) {
   const h = state.holdings.find(x => x.id === id);
   if (!h) return;
+
   el.holdingId.value = h.id;
   el.ticker.value = h.ticker;
   el.name.value = h.name || "";
@@ -193,13 +213,17 @@ window.editHolding = function(id) {
   el.formEyebrow.textContent = "POSITION";
   el.deleteBtn.classList.remove("hidden");
   el.dialog.showModal();
+};
+
+function closeDialog() {
+  el.dialog.close();
 }
 
-function closeDialog() { el.dialog.close(); }
-
-el.form.addEventListener("submit", (e) => {
+el.form.addEventListener("submit", e => {
   e.preventDefault();
   const id = el.holdingId.value || crypto.randomUUID();
+  const previous = state.holdings.find(h => h.id === id);
+
   const holding = {
     id,
     ticker: el.ticker.value.trim().toUpperCase(),
@@ -210,12 +234,14 @@ el.form.addEventListener("submit", (e) => {
     currency: el.currency.value,
     buyPrice: Number(el.buyPrice.value),
     currentPrice: Number(el.currentPrice.value),
-    quoteSource: (state.holdings.find(h => h.id === id) || {}).quoteSource || null,
-    lastUpdated: (state.holdings.find(h => h.id === id) || {}).lastUpdated || null
+    quoteSource: previous?.quoteSource || "Manual",
+    lastUpdated: previous?.lastUpdated || null
   };
+
   const idx = state.holdings.findIndex(h => h.id === id);
   if (idx >= 0) state.holdings[idx] = holding;
   else state.holdings.push(holding);
+
   save();
   render();
   closeDialog();
@@ -250,11 +276,15 @@ el.assetFilter.addEventListener("change", e => {
   state.filters.asset = e.target.value;
   render();
 });
+
 el.usdJpyInput.addEventListener("input", e => {
   state.settings.usdJpy = Number(e.target.value) || 0;
+  state.settings.fxSource = "Manual";
+  state.settings.lastFxUpdate = new Date().toISOString();
   save();
   render();
 });
+
 el.themeToggle.addEventListener("click", () => {
   state.settings.theme = state.settings.theme === "dark" ? "light" : "dark";
   document.body.classList.toggle("dark", state.settings.theme === "dark");
@@ -277,13 +307,15 @@ el.exportBtn.addEventListener("click", () => {
 el.importInput.addEventListener("change", async e => {
   const file = e.target.files?.[0];
   if (!file) return;
+
   const text = await file.text();
   const lines = text.split(/\r?\n/).filter(Boolean);
   if (lines.length < 2) return;
+
   const parseLine = line => {
     const out = [];
     let cur = "", quoted = false;
-    for (let i=0; i<line.length; i++) {
+    for (let i = 0; i < line.length; i++) {
       const ch = line[i];
       if (ch === '"' && line[i+1] === '"') { cur += '"'; i++; }
       else if (ch === '"') quoted = !quoted;
@@ -293,6 +325,7 @@ el.importInput.addEventListener("change", async e => {
     out.push(cur);
     return out;
   };
+
   const headers = parseLine(lines[0]);
   state.holdings = lines.slice(1).map(line => {
     const vals = parseLine(line);
@@ -307,48 +340,23 @@ el.importInput.addEventListener("change", async e => {
       currency: obj.currency || (obj.market === "US" ? "USD" : "JPY"),
       buyPrice: Number(obj.buyPrice || 0),
       currentPrice: Number(obj.currentPrice || 0),
-      quoteSource: null,
+      quoteSource: "Manual",
       lastUpdated: null
     };
   });
+
   save();
   render();
   e.target.value = "";
 });
 
-async function refreshPrices({ silent = false } = {}) {
-  if (!state.holdings.length) return;
-  const refreshBtn = document.getElementById("refreshPricesBtn");
-  if (refreshBtn && !silent) {
-    refreshBtn.disabled = true;
-    refreshBtn.textContent = "Refreshing…";
-  }
-
-  const results = await Promise.allSettled(state.holdings.map(fetchQuoteForHolding));
-
-  state.holdings = state.holdings.map((h, i) => {
-    const r = results[i];
-    if (r.status !== "fulfilled" || !r.value || r.value.price == null) return h;
-    return {
-      ...h,
-      currentPrice: Number(r.value.price),
-      priceSource: r.value.source || "Yahoo Finance",
-      lastUpdated: new Date().toISOString()
-    };
-  });
-
-  state.settings.lastAutoRefresh = new Date().toISOString();
-  save();
-  render();
-
-  if (refreshBtn && !silent) {
-    refreshBtn.disabled = false;
-    refreshBtn.textContent = "↻ Refresh prices";
-  }
+function toYahooSymbol(h) {
+  const raw = String(h.ticker || "").trim().toUpperCase();
+  if (h.market === "JP" && /^\d{4}$/.test(raw)) return `${raw}.T`;
+  return raw;
 }
 
-async function fetchQuoteForHolding(h) {
-  const symbol = toYahooSymbol(h);
+async function fetchYahooChart(symbol) {
   const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=5d`;
   const res = await fetch(url, {
     method: "GET",
@@ -358,123 +366,106 @@ async function fetchQuoteForHolding(h) {
   });
 
   if (!res.ok) throw new Error(`Quote failed for ${symbol}`);
+
   const data = await res.json();
   const result = data?.chart?.result?.[0];
-  const meta = result?.meta;
+  if (!result) throw new Error(`No quote result for ${symbol}`);
+
+  const meta = result.meta || {};
   const closes = result?.indicators?.quote?.[0]?.close || [];
   const lastClose = [...closes].reverse().find(v => v != null);
-  const price = meta?.regularMarketPrice ?? meta?.previousClose ?? lastClose;
+  const price = meta.regularMarketPrice ?? meta.previousClose ?? lastClose;
 
   if (price == null) throw new Error(`No price for ${symbol}`);
-  return { price, source: "Yahoo Finance" };
+
+  return { price: Number(price), meta };
 }
 
-function toYahooSymbol(h) {
-  const raw = String(h.ticker || "").trim().toUpperCase();
-  if (h.market === "JP" && /^\d{4}$/.test(raw)) return `${raw}.T`;
-  return raw;
-} = {}) {
-  if (!state.holdings.length) return;
-  const refreshBtn = document.getElementById("refreshPricesBtn");
-  if (refreshBtn && !silent) {
-    refreshBtn.disabled = true;
-    refreshBtn.textContent = "Refreshing…";
+async function fetchQuoteForHolding(h) {
+  const symbol = toYahooSymbol(h);
+  const quote = await fetchYahooChart(symbol);
+  return {
+    price: quote.price,
+    source: "Yahoo Finance"
+  };
+}
+
+async function refreshUsdJpy() {
+  try {
+    const quote = await fetchYahooChart("USDJPY=X");
+    if (!Number.isFinite(quote.price) || quote.price <= 0) throw new Error("Invalid USD/JPY rate");
+
+    state.settings.usdJpy = quote.price;
+    state.settings.fxSource = "Yahoo Finance";
+    state.settings.lastFxUpdate = new Date().toISOString();
+    save();
+    render();
+    return true;
+  } catch (err) {
+    console.warn("USD/JPY automatic refresh failed; keeping saved rate.", err);
+    return false;
+  }
+}
+
+async function refreshPrices({ silent = false } = {}) {
+  if (el.refreshPricesBtn && !silent) {
+    el.refreshPricesBtn.disabled = true;
+    el.refreshPricesBtn.textContent = "Refreshing…";
   }
 
   try {
-    const response = await fetch("/api/quotes", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ holdings: state.holdings })
-    });
-    if (!response.ok) throw new Error(`Quote refresh failed (${response.status})`);
-    const data = await response.json();
-    const quotes = data.quotes || data;
+    const holdingResults = await Promise.allSettled(state.holdings.map(fetchQuoteForHolding));
+    const fxPromise = refreshUsdJpy();
 
-    state.holdings = state.holdings.map(h => {
-      const q = quotes[h.id] || quotes[h.ticker] || null;
-      if (!q || q.price == null) return h;
+    state.holdings = state.holdings.map((h, i) => {
+      const r = holdingResults[i];
+      if (r.status !== "fulfilled" || !r.value || r.value.price == null) return h;
+
       return {
         ...h,
-        currentPrice: Number(q.price),
-        priceSource: q.source || "Automatic",
-        lastUpdated: q.updatedAt || new Date().toISOString()
+        currentPrice: Number(r.value.price),
+        quoteSource: r.value.source || "Yahoo Finance",
+        lastUpdated: new Date().toISOString()
       };
     });
-    save();
-    render();
+
+    await fxPromise;
     state.settings.lastAutoRefresh = new Date().toISOString();
     save();
+    render();
   } catch (err) {
-    console.warn("Automatic price refresh failed:", err);
+    console.warn("Automatic refresh failed:", err);
   } finally {
-    if (refreshBtn && !silent) {
-      refreshBtn.disabled = false;
-      refreshBtn.textContent = "↻ Refresh prices";
+    if (el.refreshPricesBtn && !silent) {
+      el.refreshPricesBtn.disabled = false;
+      el.refreshPricesBtn.textContent = "↻ Refresh prices";
     }
   }
 }
 
-load();
-
-
-async function refreshHolding(h) {
-  const params = new URLSearchParams({ ticker: h.ticker, market: h.market, assetType: h.assetType });
-  const r = await fetch(`/api/quote?${params}`);
-  const data = await r.json();
-  if (!r.ok) throw new Error(data.error || "Quote lookup failed");
-  h.currentPrice = Number(data.price);
-  if (data.currency) h.currency = data.currency;
-  if (!h.name && data.name) h.name = data.name;
-  h.quoteSource = data.source || "Automatic";
-  h.lastUpdated = Date.now();
-  return data;
-}
-
-async function refreshAll() {
-  if (!state.holdings.length) return;
-  el.refreshBtn.classList.add("refreshing");
-  const oldText = el.refreshBtn.textContent;
-  el.refreshBtn.textContent = "Refreshing…";
-  let ok = 0, failed = 0;
-  // Sequential on purpose: friendlier to free public endpoints.
-  for (const h of state.holdings) {
-    try { await refreshHolding(h); ok++; }
-    catch (e) { failed++; console.warn(h.ticker, e.message); }
-  }
-  save();
-  render();
-  el.refreshBtn.classList.remove("refreshing");
-  el.refreshBtn.textContent = failed ? `↻ Refreshed ${ok}; ${failed} manual` : `✓ Prices refreshed`;
-  setTimeout(() => { el.refreshBtn.textContent = oldText; }, 2200);
-}
-
-el.refreshBtn.addEventListener("click", refreshAll);
-
-
 function startAutomaticRefresh() {
   if (autoRefreshTimer) clearInterval(autoRefreshTimer);
 
-  // Refresh once when the app opens.
   refreshPrices({ silent: true }).catch(() => {});
 
-  // Refresh periodically while the app remains open.
   autoRefreshTimer = setInterval(() => {
     refreshPrices({ silent: true }).catch(() => {});
   }, AUTO_REFRESH_INTERVAL_MS);
 }
 
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible") {
-    const last = state.settings.lastAutoRefresh
-      ? new Date(state.settings.lastAutoRefresh).getTime()
-      : 0;
-    if (Date.now() - last >= AUTO_REFRESH_INTERVAL_MS) {
-      refreshPrices({ silent: true }).catch(() => {});
-    }
+  if (document.visibilityState !== "visible") return;
+
+  const last = state.settings.lastAutoRefresh
+    ? new Date(state.settings.lastAutoRefresh).getTime()
+    : 0;
+
+  if (Date.now() - last >= AUTO_REFRESH_INTERVAL_MS) {
+    refreshPrices({ silent: true }).catch(() => {});
   }
 });
 
-window.addEventListener("load", startAutomaticRefresh);
+el.refreshPricesBtn?.addEventListener("click", () => refreshPrices({ silent: false }));
 
-document.getElementById("refreshPricesBtn")?.addEventListener("click", () => refreshPrices({ silent:false }));
+load();
+window.addEventListener("load", startAutomaticRefresh);
