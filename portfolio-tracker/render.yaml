@@ -1,9 +1,0 @@
-services:
-  - type: web
-    name: portfolio-tracker
-    runtime: python
-    plan: free
-    buildCommand: "echo 'No build step required'"
-    startCommand: "python server.py"
-    healthCheckPath: /health
-    autoDeployTrigger: commit
